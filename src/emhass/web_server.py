@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import sys
 from flask import Flask, request, make_response, render_template
 from jinja2 import Environment, PackageLoader
 from requests import get
 from waitress import serve
-from importlib.metadata import version
+from importlib.metadata import version, PackageNotFoundError
 from pathlib import Path
 import os, json, argparse, pickle, yaml, logging
 from distutils.util import strtobool
 import pandas as pd
-import plotly.express as px
-pd.options.plotting.backend = "plotly"
+
 from emhass.command_line import set_input_data_dict
 from emhass.command_line import perfect_forecast_optim, dayahead_forecast_optim, naive_mpc_optim
 from emhass.command_line import forecast_model_fit, forecast_model_predict, forecast_model_tune
 from emhass.command_line import publish_data
+from emhass.utils import get_injection_dict, get_injection_dict_forecast_model_fit, \
+    get_injection_dict_forecast_model_tune, build_params
 
 # Define the Flask instance
 app = Flask(__name__)
@@ -252,10 +254,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Define the paths
-    if args.addon == 1:
-        OPTIONS_PATH = "/data/options.json"
+    if args.addon==1:
+        OPTIONS_PATH = os.getenv('OPTIONS_PATH', default="/data/options.json")
         options_json = Path(OPTIONS_PATH)
-        CONFIG_PATH = "/usr/src/config_emhass.yaml"
+        CONFIG_PATH = os.getenv("CONFIG_PATH", default="/usr/src/config_emhass.yaml")
         hass_url = args.url
         key = args.key
         # Read options info
@@ -266,13 +268,25 @@ if __name__ == "__main__":
             app.logger.error("options.json does not exists")
         DATA_PATH = "/share/" #"/data/"
     else:
-        CONFIG_PATH = "/app/config_emhass.yaml"
-        options = None
-        DATA_PATH = "/app/data/"
+        use_options = os.getenv('USE_OPTIONS', default=False)
+        if use_options:
+            OPTIONS_PATH = os.getenv('OPTIONS_PATH', default="/app/options.json")
+            options_json = Path(OPTIONS_PATH)
+            # Read options info
+            if options_json.exists():
+                with options_json.open('r') as data:
+                    options = json.load(data)
+            else:
+                app.logger.error("options.json does not exists")
+        else:
+            options = None
+        CONFIG_PATH = os.getenv("CONFIG_PATH", default="/app/config_emhass.yaml")
+        DATA_PATH = os.getenv("DATA_PATH", default="/app/data/")
+
     config_path = Path(CONFIG_PATH)
     data_path = Path(DATA_PATH)
     
-    # Read example config file
+    # Read the example default config file
     if config_path.exists():
         with open(config_path, 'r') as file:
             config = yaml.load(file, Loader=yaml.FullLoader)
@@ -280,8 +294,8 @@ if __name__ == "__main__":
         optim_conf = config['optim_conf']
         plant_conf = config['plant_conf']
     else:
-        app.logger.error("config_emhass.json does not exists")
-        app.logger.info("Falied config_path: "+str(config_path))
+        app.logger.error("Unable to open the default configuration yaml file")
+        app.logger.info("Failed config_path: "+str(config_path))
 
     params = {}
     params['retrieve_hass_conf'] = retrieve_hass_conf
@@ -296,19 +310,19 @@ if __name__ == "__main__":
     else:
         injection_dict = None
     
-    if args.addon == 1:
+    if args.addon==1:
         # The cost function
-        costfun = options['costfun']
+        costfun = options.get('costfun', 'profit')
         # Some data from options
-        logging_level = options['logging_level']
-        url_from_options = options['hass_url']
-        if url_from_options == 'empty':
+        logging_level = options.get('logging_level','INFO')
+        url_from_options = options.get('hass_url', 'empty')
+        if url_from_options == 'empty' or url_from_options == '':
             url = hass_url+"/config"
         else:
             hass_url = url_from_options
             url = hass_url+"/api/config"
-        token_from_options = options['long_lived_token']
-        if token_from_options == 'empty':
+        token_from_options = options.get('long_lived_token', 'empty')
+        if token_from_options == 'empty' or token_from_options == '':
             long_lived_token = key
         else:
             long_lived_token = token_from_options
@@ -329,12 +343,12 @@ if __name__ == "__main__":
     else:
         costfun = os.getenv('LOCAL_COSTFUN', default='profit')
         logging_level = os.getenv('LOGGING_LEVEL', default='INFO')
-        with open('/app/secrets_emhass.yaml', 'r') as file:
+        with open(os.getenv('SECRETS_PATH', default='/app/secrets_emhass.yaml'), 'r') as file:
             params_secrets = yaml.load(file, Loader=yaml.FullLoader)
         hass_url = params_secrets['hass_url']
         
     # Build params
-    params = build_params(params, options, args.addon)
+    params = build_params(params, params_secrets, options, args.addon, app.logger)
     with open(str(data_path / 'params.pkl'), "wb") as fid:
         pickle.dump((config_path, params), fid)
 
@@ -365,5 +379,8 @@ if __name__ == "__main__":
     app.logger.info("Launching the emhass webserver at: http://"+web_ui_url+":"+str(port))
     app.logger.info("Home Assistant data fetch will be performed using url: "+hass_url)
     app.logger.info("The data path is: "+str(data_path))
-    app.logger.info("Using core emhass version: "+version('emhass'))
+    try:
+        app.logger.info("Using core emhass version: "+version('emhass'))
+    except PackageNotFoundError:
+        app.logger.info("Using development emhass version")
     serve(app, host=web_ui_url, port=port, threads=8)
