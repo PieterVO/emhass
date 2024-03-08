@@ -98,7 +98,7 @@ def action_call(action_name):
     runtimeparams = request.get_json(force=True)
     params = json.dumps(params)
     if runtimeparams is not None and runtimeparams != '{}':
-        app.logger.info("Passed runtime parameters: " + runtimeparams)
+        app.logger.info("Passed runtime parameters: " + str(runtimeparams))
     runtimeparams = json.dumps(runtimeparams)
     ActionStr = " >> Setting input data dict"
     app.logger.info(ActionStr)
